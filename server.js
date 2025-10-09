@@ -2,7 +2,6 @@ const express = require('express');
 const { Pool } = require('pg');
 const bcrypt = require('bcrypt');
 const cors = require('cors');
-const path = require('path');
 require('dotenv').config();
 
 const app = express();
@@ -11,7 +10,7 @@ const PORT = process.env.PORT || 3000;
 // Middleware
 app.use(cors());
 app.use(express.json());
-app.use(express.static(path.join(__dirname)));
+//app.use(express.static(path.join(__dirname)));
 
 // Database configuration
 const dbConfig = {
@@ -1295,7 +1294,7 @@ const startServer = async () => {
     app.listen(PORT, () => {
       console.log(`🚀 JSJ LinkUp server running on port ${PORT}`);
       console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
-      console.log(`🌐 Base URL: http://localhost:${PORT}`);
+      console.log(`🔒 Server ready for API requests`);
     });
   } catch (error) {
     console.error('Failed to start server:', error);
