@@ -77,11 +77,6 @@ const authenticateAdmin = (req, res, next) => {
   next();
 };
 
-// Serve the main page
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'index.html'));
-});
-
 // ==================== INITIALIZATION ====================
 app.post('/api/init-db', async (req, res) => {
   const client = await pool.connect();
