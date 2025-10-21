@@ -10,7 +10,6 @@ const PORT = process.env.PORT || 3000;
 // Middleware
 app.use(cors());
 app.use(express.json());
-//app.use(express.static(path.join(__dirname)));
 
 // Database configuration
 const dbConfig = {
@@ -843,7 +842,6 @@ app.post('/api/events', authenticateStudent, async (req, res) => {
   try {
     const { name, description, location, event_datetime } = req.body;
     const result = await pool.query(
-     
       `INSERT INTO events (name, description, location, event_datetime, created_by)
        VALUES ($1, $2, $3, $4, $5) RETURNING *`,
       [name, description, location, event_datetime, req.user.student_number]
@@ -978,30 +976,108 @@ app.delete('/api/classes/:class_id/enroll', authenticateStudent, async (req, res
 app.get('/api/posts', async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT p.*, s.name as creator_name, s.surname as creator_surname,
-             COUNT(l.id) as like_count
+      SELECT 
+        p.*, 
+        s.name as creator_name, 
+        s.surname as creator_surname,
+        s.student_number as created_by,
+        COUNT(DISTINCT l.id) as likes_count,
+        ARRAY_AGG(DISTINCT l.student_number) as liked_by,
+        (
+          SELECT COUNT(*) 
+          FROM posts p2 
+          WHERE p2.created_by = p.created_by
+        ) as posts_count
       FROM posts p
       LEFT JOIN students s ON p.created_by = s.student_number
       LEFT JOIN likes l ON p.id = l.post_id
-      GROUP BY p.id, s.name, s.surname
+      GROUP BY p.id, s.name, s.surname, s.student_number
       ORDER BY p.created_at DESC`
     );
-    res.json({ posts: result.rows });
+
+    // Format the response to match what Flutter expects
+    const formattedPosts = result.rows.map(post => ({
+      id: post.id,
+      title: post.title,
+      caption: post.caption,
+      content: post.caption, // For compatibility with Flutter
+      body: post.caption,    // For compatibility with Flutter
+      created_by: post.created_by,
+      created_at: post.created_at,
+      creator_name: post.creator_name,
+      creator_surname: post.creator_surname,
+      creator_firstname: post.creator_name, // For Flutter
+      creator_surname: post.creator_surname,
+      likes_count: parseInt(post.likes_count) || 0,
+      comments_count: 0, // You can add comments functionality later
+      liked_by: post.liked_by || [], // Array of student numbers who liked
+      comments: [] // Empty array for now
+    }));
+
+    res.json({ posts: formattedPosts });
   } catch (error) {
+    console.error('Error fetching posts:', error);
     res.status(500).json({ error: 'Internal server error: ' + error.message });
   }
 });
 
 app.post('/api/posts', authenticateStudent, async (req, res) => {
   try {
-    const { title, caption } = req.body;
+    const { title, caption, content } = req.body;
+    const created_by = req.user.student_number;
+
+    if (!title) {
+      return res.status(400).json({ error: 'Title is required' });
+    }
+
+    // Use caption, content, or empty string
+    const postContent = caption || content || '';
+
     const result = await pool.query(
       `INSERT INTO posts (title, caption, created_by)
        VALUES ($1, $2, $3) RETURNING *`,
-      [title, caption, req.user.student_number]
+      [title, postContent, created_by]
     );
-    res.status(201).json({ message: 'Post created successfully', post: result.rows[0] });
+
+    // Get the full post with creator info
+    const fullPost = await pool.query(`
+      SELECT 
+        p.*, 
+        s.name as creator_name, 
+        s.surname as creator_surname,
+        s.student_number as created_by,
+        0 as likes_count,
+        ARRAY[]::text[] as liked_by
+      FROM posts p
+      LEFT JOIN students s ON p.created_by = s.student_number
+      WHERE p.id = $1`,
+      [result.rows[0].id]
+    );
+
+    const formattedPost = {
+      id: fullPost.rows[0].id,
+      title: fullPost.rows[0].title,
+      caption: fullPost.rows[0].caption,
+      content: fullPost.rows[0].caption,
+      body: fullPost.rows[0].caption,
+      created_by: fullPost.rows[0].created_by,
+      created_at: fullPost.rows[0].created_at,
+      creator_name: fullPost.rows[0].creator_name,
+      creator_surname: fullPost.rows[0].creator_surname,
+      creator_firstname: fullPost.rows[0].creator_name,
+      creator_surname: fullPost.rows[0].creator_surname,
+      likes_count: 0,
+      comments_count: 0,
+      liked_by: [],
+      comments: []
+    };
+
+    res.status(201).json({ 
+      message: 'Post created successfully', 
+      post: formattedPost 
+    });
   } catch (error) {
+    console.error('Error creating post:', error);
     res.status(500).json({ error: 'Internal server error: ' + error.message });
   }
 });
@@ -1011,9 +1087,15 @@ app.post('/api/posts/:post_id/like', authenticateStudent, async (req, res) => {
     const { post_id } = req.params;
     const student_number = req.user.student_number;
 
+    // Check if post exists
+    const postCheck = await pool.query('SELECT id FROM posts WHERE id = $1', [post_id]);
+    if (postCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'Post not found' });
+    }
+
     // Check if already liked
     const existingLike = await pool.query(
-      'SELECT * FROM likes WHERE post_id = $1 AND student_number = $2',
+      'SELECT id FROM likes WHERE post_id = $1 AND student_number = $2',
       [post_id, student_number]
     );
 
@@ -1026,8 +1108,18 @@ app.post('/api/posts/:post_id/like', authenticateStudent, async (req, res) => {
       [post_id, student_number]
     );
 
-    res.json({ message: 'Post liked successfully' });
+    // Get updated like count
+    const likeCountResult = await pool.query(
+      'SELECT COUNT(*) as like_count FROM likes WHERE post_id = $1',
+      [post_id]
+    );
+
+    res.json({ 
+      message: 'Post liked successfully',
+      like_count: parseInt(likeCountResult.rows[0].like_count)
+    });
   } catch (error) {
+    console.error('Error liking post:', error);
     res.status(500).json({ error: 'Internal server error: ' + error.message });
   }
 });
@@ -1038,7 +1130,7 @@ app.delete('/api/posts/:post_id/like', authenticateStudent, async (req, res) => 
     const student_number = req.user.student_number;
 
     const result = await pool.query(
-      'DELETE FROM likes WHERE post_id = $1 AND student_number = $2 RETURNING *',
+      'DELETE FROM likes WHERE post_id = $1 AND student_number = $2 RETURNING id',
       [post_id, student_number]
     );
 
@@ -1046,8 +1138,53 @@ app.delete('/api/posts/:post_id/like', authenticateStudent, async (req, res) => 
       return res.status(404).json({ error: 'Like not found' });
     }
 
-    res.json({ message: 'Post unliked successfully' });
+    // Get updated like count
+    const likeCountResult = await pool.query(
+      'SELECT COUNT(*) as like_count FROM likes WHERE post_id = $1',
+      [post_id]
+    );
+
+    res.json({ 
+      message: 'Post unliked successfully',
+      like_count: parseInt(likeCountResult.rows[0].like_count)
+    });
   } catch (error) {
+    console.error('Error unliking post:', error);
+    res.status(500).json({ error: 'Internal server error: ' + error.message });
+  }
+});
+
+// Optional: Add comments functionality later
+app.get('/api/posts/:post_id/comments', async (req, res) => {
+  try {
+    const { post_id } = req.params;
+    // For now, return empty array since comments table doesn't exist yet
+    res.json({ comments: [] });
+  } catch (error) {
+    console.error('Error fetching comments:', error);
+    res.status(500).json({ error: 'Internal server error: ' + error.message });
+  }
+});
+
+app.post('/api/posts/:post_id/comments', authenticateStudent, async (req, res) => {
+  try {
+    const { post_id } = req.params;
+    const { content } = req.body;
+    
+    // For now, just return success since comments table doesn't exist yet
+    // You can implement this later when you create a comments table
+    res.status(201).json({ 
+      message: 'Comment functionality coming soon',
+      comment: {
+        id: Date.now(),
+        content: content,
+        author_id: req.user.student_number,
+        author_name: req.user.name,
+        created_at: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    console.error('Error creating comment:', error);
     res.status(500).json({ error: 'Internal server error: ' + error.message });
   }
 });
