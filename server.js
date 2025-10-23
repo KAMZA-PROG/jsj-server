@@ -7,11 +7,9 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
 app.use(cors());
 app.use(express.json());
 
-// Database configuration
 const dbConfig = {
   user: process.env.DB_USER || 'postgres',
   host: process.env.DB_HOST || 'localhost',
@@ -28,7 +26,6 @@ const dbConfig = {
 
 const pool = new Pool(dbConfig);
 
-// Test database connection
 const testConnection = async () => {
   try {
     const client = await pool.connect();
@@ -44,11 +41,9 @@ const testConnection = async () => {
   }
 };
 
-// Simple session storage
 const activeSessions = new Map();
 const activeAdminSessions = new Map();
 
-// Authentication middleware
 const authenticateStudent = (req, res, next) => {
   const sessionId = req.headers['authorization'] || req.headers['session-id'];
   if (!sessionId) {
@@ -75,13 +70,11 @@ const authenticateAdmin = (req, res, next) => {
   next();
 };
 
-// ==================== INITIALIZATION ====================
 app.post('/api/init-db', async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
-    // Create all tables
     const tables = [
       `CREATE TABLE IF NOT EXISTS campuses (
         id SERIAL PRIMARY KEY,
@@ -183,6 +176,14 @@ app.post('/api/init-db', async (req, res) => {
         created_by VARCHAR(9) NOT NULL REFERENCES students(student_number),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )`,
+      `CREATE TABLE IF NOT EXISTS comments (
+        id SERIAL PRIMARY KEY,
+        post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+        student_number VARCHAR(9) NOT NULL REFERENCES students(student_number) ON DELETE CASCADE,
+        content TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )`,
       `CREATE TABLE IF NOT EXISTS notifications (
         id SERIAL PRIMARY KEY,
         name VARCHAR(200) NOT NULL,
@@ -223,12 +224,10 @@ app.post('/api/init-db', async (req, res) => {
       )`
     ];
 
-    // Execute all table creation queries
     for (const tableQuery of tables) {
       await client.query(tableQuery);
     }
 
-    // Create indexes
     const indexes = [
       'CREATE INDEX IF NOT EXISTS idx_students_email ON students(email)',
       'CREATE INDEX IF NOT EXISTS idx_students_course_id ON students(course_id)',
@@ -241,14 +240,16 @@ app.post('/api/init-db', async (req, res) => {
       'CREATE INDEX IF NOT EXISTS idx_notifications_target ON notifications(target_student, target_admin)',
       'CREATE INDEX IF NOT EXISTS idx_ratings_rator ON ratings(rator_student, rator_admin)',
       'CREATE INDEX IF NOT EXISTS idx_posts_created_at ON posts(created_at)',
-      'CREATE INDEX IF NOT EXISTS idx_likes_post ON likes(post_id)'
+      'CREATE INDEX IF NOT EXISTS idx_likes_post ON likes(post_id)',
+      'CREATE INDEX IF NOT EXISTS idx_comments_post_id ON comments(post_id)',
+      'CREATE INDEX IF NOT EXISTS idx_comments_created_at ON comments(created_at)',
+      'CREATE INDEX IF NOT EXISTS idx_comments_student_number ON comments(student_number)'
     ];
 
     for (const indexQuery of indexes) {
       await client.query(indexQuery);
     }
 
-    // Insert sample data
     await client.query(`
       INSERT INTO campuses (id, campus_name, location, campus_size) 
       VALUES 
@@ -298,7 +299,6 @@ app.post('/api/init-db', async (req, res) => {
       ON CONFLICT DO NOTHING
     `);
 
-    // Create default admin
     const hashedAdminPassword = await bcrypt.hash('admin123', 10);
     await client.query(`
       INSERT INTO admin (admin_id, password, email, name, surname) 
@@ -317,7 +317,6 @@ app.post('/api/init-db', async (req, res) => {
   }
 });
 
-// ==================== AUTHENTICATION ROUTES ====================
 app.post('/api/register', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -464,7 +463,6 @@ app.post('/api/logout', (req, res) => {
   res.json({ message: 'Logout successful' });
 });
 
-// ==================== CAMPUSES ROUTES ====================
 app.get('/api/campuses', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM campuses ORDER BY campus_name');
@@ -517,7 +515,6 @@ app.delete('/api/campuses/:id', authenticateAdmin, async (req, res) => {
   }
 });
 
-// ==================== FACULTY ROUTES ====================
 app.get('/api/faculties', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM faculty ORDER BY faculty_name');
@@ -540,7 +537,6 @@ app.post('/api/faculties', authenticateAdmin, async (req, res) => {
   }
 });
 
-// ==================== COURSES ROUTES ====================
 app.get('/api/courses', async (req, res) => {
   try {
     const result = await pool.query(`
@@ -581,7 +577,6 @@ app.post('/api/courses', authenticateAdmin, async (req, res) => {
   }
 });
 
-// ==================== MODULES ROUTES ====================
 app.get('/api/modules', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM modules ORDER BY module_name');
@@ -604,7 +599,6 @@ app.post('/api/modules', authenticateAdmin, async (req, res) => {
   }
 });
 
-// ==================== STUDENTS ROUTES ====================
 app.get('/api/students', async (req, res) => {
   try {
     const result = await pool.query(`
@@ -649,7 +643,6 @@ app.put('/api/students/:student_number', authenticateStudent, async (req, res) =
     const { student_number } = req.params;
     const { name, surname, email, phone_number, year_of_study } = req.body;
     
-    // Students can only update their own profile
     if (req.user.student_number !== student_number) {
       return res.status(403).json({ error: 'Cannot update other student profiles' });
     }
@@ -683,7 +676,6 @@ app.delete('/api/students/:student_number', authenticateAdmin, async (req, res) 
   }
 });
 
-// ==================== GROUPS ROUTES ====================
 app.get('/api/groups', async (req, res) => {
   try {
     const result = await pool.query(`
@@ -717,7 +709,6 @@ app.put('/api/groups/:id', authenticateStudent, async (req, res) => {
     const { id } = req.params;
     const { group_name, group_description, max_size } = req.body;
     
-    // Check if user is the creator
     const groupCheck = await pool.query('SELECT created_by FROM groups WHERE id = $1', [id]);
     if (groupCheck.rows.length === 0) {
       return res.status(404).json({ error: 'Group not found' });
@@ -741,7 +732,6 @@ app.delete('/api/groups/:id', authenticateStudent, async (req, res) => {
   try {
     const { id } = req.params;
     
-    // Check if user is the creator
     const groupCheck = await pool.query('SELECT created_by FROM groups WHERE id = $1', [id]);
     if (groupCheck.rows.length === 0) {
       return res.status(404).json({ error: 'Group not found' });
@@ -757,7 +747,6 @@ app.delete('/api/groups/:id', authenticateStudent, async (req, res) => {
   }
 });
 
-// ==================== LINKS ROUTES ====================
 app.get('/api/links', authenticateStudent, async (req, res) => {
   try {
     const result = await pool.query(`
@@ -786,7 +775,6 @@ app.post('/api/links', authenticateStudent, async (req, res) => {
       return res.status(400).json({ error: 'Cannot link with yourself' });
     }
 
-    // Check if link already exists
     const existingLink = await pool.query(
       'SELECT id FROM links WHERE (connector = $1 AND acceptor = $2) OR (connector = $2 AND acceptor = $1)',
       [connector, acceptor]
@@ -823,7 +811,6 @@ app.delete('/api/links/:id', authenticateStudent, async (req, res) => {
   }
 });
 
-// ==================== EVENTS ROUTES ====================
 app.get('/api/events', async (req, res) => {
   try {
     const result = await pool.query(`
@@ -857,7 +844,6 @@ app.put('/api/events/:id', authenticateStudent, async (req, res) => {
     const { id } = req.params;
     const { name, description, location, event_datetime } = req.body;
     
-    // Check if user is the creator
     const eventCheck = await pool.query('SELECT created_by FROM events WHERE id = $1', [id]);
     if (eventCheck.rows.length === 0) {
       return res.status(404).json({ error: 'Event not found' });
@@ -881,7 +867,6 @@ app.delete('/api/events/:id', authenticateStudent, async (req, res) => {
   try {
     const { id } = req.params;
     
-    // Check if user is the creator
     const eventCheck = await pool.query('SELECT created_by FROM events WHERE id = $1', [id]);
     if (eventCheck.rows.length === 0) {
       return res.status(404).json({ error: 'Event not found' });
@@ -897,7 +882,6 @@ app.delete('/api/events/:id', authenticateStudent, async (req, res) => {
   }
 });
 
-// ==================== CLASSES ROUTES ====================
 app.get('/api/classes', async (req, res) => {
   try {
     const result = await pool.query(`
@@ -931,7 +915,6 @@ app.post('/api/classes/:class_id/enroll', authenticateStudent, async (req, res) 
     const { class_id } = req.params;
     const student_number = req.user.student_number;
 
-    // Check if already enrolled
     const existingEnrollment = await pool.query(
       'SELECT * FROM student_classes WHERE student_number = $1 AND class_id = $2',
       [student_number, class_id]
@@ -972,7 +955,6 @@ app.delete('/api/classes/:class_id/enroll', authenticateStudent, async (req, res
   }
 });
 
-// ==================== POSTS ROUTES ====================
 app.get('/api/posts', async (req, res) => {
   try {
     const result = await pool.query(`
@@ -982,36 +964,32 @@ app.get('/api/posts', async (req, res) => {
         s.surname as creator_surname,
         s.student_number as created_by,
         COUNT(DISTINCT l.id) as likes_count,
-        ARRAY_AGG(DISTINCT l.student_number) as liked_by,
-        (
-          SELECT COUNT(*) 
-          FROM posts p2 
-          WHERE p2.created_by = p.created_by
-        ) as posts_count
+        COUNT(DISTINCT c.id) as comments_count,
+        ARRAY_AGG(DISTINCT l.student_number) as liked_by
       FROM posts p
       LEFT JOIN students s ON p.created_by = s.student_number
       LEFT JOIN likes l ON p.id = l.post_id
+      LEFT JOIN comments c ON p.id = c.post_id
       GROUP BY p.id, s.name, s.surname, s.student_number
       ORDER BY p.created_at DESC`
     );
 
-    // Format the response to match what Flutter expects
     const formattedPosts = result.rows.map(post => ({
       id: post.id,
       title: post.title,
       caption: post.caption,
-      content: post.caption, // For compatibility with Flutter
-      body: post.caption,    // For compatibility with Flutter
+      content: post.caption,
+      body: post.caption,
       created_by: post.created_by,
       created_at: post.created_at,
       creator_name: post.creator_name,
       creator_surname: post.creator_surname,
-      creator_firstname: post.creator_name, // For Flutter
+      creator_firstname: post.creator_name,
       creator_surname: post.creator_surname,
       likes_count: parseInt(post.likes_count) || 0,
-      comments_count: 0, // You can add comments functionality later
-      liked_by: post.liked_by || [], // Array of student numbers who liked
-      comments: [] // Empty array for now
+      comments_count: parseInt(post.comments_count) || 0,
+      liked_by: post.liked_by || [],
+      comments: []
     }));
 
     res.json({ posts: formattedPosts });
@@ -1030,7 +1008,6 @@ app.post('/api/posts', authenticateStudent, async (req, res) => {
       return res.status(400).json({ error: 'Title is required' });
     }
 
-    // Use caption, content, or empty string
     const postContent = caption || content || '';
 
     const result = await pool.query(
@@ -1039,7 +1016,6 @@ app.post('/api/posts', authenticateStudent, async (req, res) => {
       [title, postContent, created_by]
     );
 
-    // Get the full post with creator info
     const fullPost = await pool.query(`
       SELECT 
         p.*, 
@@ -1047,6 +1023,7 @@ app.post('/api/posts', authenticateStudent, async (req, res) => {
         s.surname as creator_surname,
         s.student_number as created_by,
         0 as likes_count,
+        0 as comments_count,
         ARRAY[]::text[] as liked_by
       FROM posts p
       LEFT JOIN students s ON p.created_by = s.student_number
@@ -1087,13 +1064,11 @@ app.post('/api/posts/:post_id/like', authenticateStudent, async (req, res) => {
     const { post_id } = req.params;
     const student_number = req.user.student_number;
 
-    // Check if post exists
     const postCheck = await pool.query('SELECT id FROM posts WHERE id = $1', [post_id]);
     if (postCheck.rows.length === 0) {
       return res.status(404).json({ error: 'Post not found' });
     }
 
-    // Check if already liked
     const existingLike = await pool.query(
       'SELECT id FROM likes WHERE post_id = $1 AND student_number = $2',
       [post_id, student_number]
@@ -1108,7 +1083,6 @@ app.post('/api/posts/:post_id/like', authenticateStudent, async (req, res) => {
       [post_id, student_number]
     );
 
-    // Get updated like count
     const likeCountResult = await pool.query(
       'SELECT COUNT(*) as like_count FROM likes WHERE post_id = $1',
       [post_id]
@@ -1138,7 +1112,6 @@ app.delete('/api/posts/:post_id/like', authenticateStudent, async (req, res) => 
       return res.status(404).json({ error: 'Like not found' });
     }
 
-    // Get updated like count
     const likeCountResult = await pool.query(
       'SELECT COUNT(*) as like_count FROM likes WHERE post_id = $1',
       [post_id]
@@ -1154,12 +1127,43 @@ app.delete('/api/posts/:post_id/like', authenticateStudent, async (req, res) => 
   }
 });
 
-// Optional: Add comments functionality later
 app.get('/api/posts/:post_id/comments', async (req, res) => {
   try {
     const { post_id } = req.params;
-    // For now, return empty array since comments table doesn't exist yet
-    res.json({ comments: [] });
+
+    const postCheck = await pool.query('SELECT id FROM posts WHERE id = $1', [post_id]);
+    if (postCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'Post not found' });
+    }
+
+    const result = await pool.query(`
+      SELECT 
+        c.*,
+        s.name as author_name,
+        s.surname as author_surname,
+        s.student_number as author_id
+      FROM comments c
+      LEFT JOIN students s ON c.student_number = s.student_number
+      WHERE c.post_id = $1
+      ORDER BY c.created_at ASC
+    `, [post_id]);
+
+    const formattedComments = result.rows.map(comment => ({
+      id: comment.id,
+      post_id: comment.post_id,
+      content: comment.content,
+      author_id: comment.author_id,
+      author_name: comment.author_name,
+      author_surname: comment.author_surname,
+      author_firstname: comment.author_name,
+      created_at: comment.created_at,
+      updated_at: comment.updated_at
+    }));
+
+    res.json({ 
+      comments: formattedComments,
+      total: formattedComments.length
+    });
   } catch (error) {
     console.error('Error fetching comments:', error);
     res.status(500).json({ error: 'Internal server error: ' + error.message });
@@ -1167,29 +1171,198 @@ app.get('/api/posts/:post_id/comments', async (req, res) => {
 });
 
 app.post('/api/posts/:post_id/comments', authenticateStudent, async (req, res) => {
+  const client = await pool.connect();
   try {
+    await client.query('BEGIN');
+    
     const { post_id } = req.params;
     const { content } = req.body;
-    
-    // For now, just return success since comments table doesn't exist yet
-    // You can implement this later when you create a comments table
+    const student_number = req.user.student_number;
+
+    if (!content || content.trim().length === 0) {
+      return res.status(400).json({ error: 'Comment content is required' });
+    }
+
+    const postCheck = await client.query('SELECT id FROM posts WHERE id = $1', [post_id]);
+    if (postCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'Post not found' });
+    }
+
+    const result = await client.query(
+      `INSERT INTO comments (post_id, student_number, content)
+       VALUES ($1, $2, $3) RETURNING *`,
+      [post_id, student_number, content.trim()]
+    );
+
+    const fullComment = await client.query(`
+      SELECT 
+        c.*,
+        s.name as author_name,
+        s.surname as author_surname,
+        s.student_number as author_id
+      FROM comments c
+      LEFT JOIN students s ON c.student_number = s.student_number
+      WHERE c.id = $1
+    `, [result.rows[0].id]);
+
+    await client.query('COMMIT');
+
+    const formattedComment = {
+      id: fullComment.rows[0].id,
+      post_id: fullComment.rows[0].post_id,
+      content: fullComment.rows[0].content,
+      author_id: fullComment.rows[0].author_id,
+      author_name: fullComment.rows[0].author_name,
+      author_surname: fullComment.rows[0].author_surname,
+      author_firstname: fullComment.rows[0].author_name,
+      created_at: fullComment.rows[0].created_at,
+      updated_at: fullComment.rows[0].updated_at
+    };
+
     res.status(201).json({ 
-      message: 'Comment functionality coming soon',
-      comment: {
-        id: Date.now(),
-        content: content,
-        author_id: req.user.student_number,
-        author_name: req.user.name,
-        created_at: new Date().toISOString()
-      }
+      message: 'Comment created successfully', 
+      comment: formattedComment 
     });
   } catch (error) {
+    await client.query('ROLLBACK');
     console.error('Error creating comment:', error);
+    res.status(500).json({ error: 'Internal server error: ' + error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.put('/api/comments/:comment_id', authenticateStudent, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    
+    const { comment_id } = req.params;
+    const { content } = req.body;
+    const student_number = req.user.student_number;
+
+    if (!content || content.trim().length === 0) {
+      return res.status(400).json({ error: 'Comment content is required' });
+    }
+
+    const commentCheck = await client.query(
+      'SELECT id, student_number FROM comments WHERE id = $1',
+      [comment_id]
+    );
+
+    if (commentCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'Comment not found' });
+    }
+
+    if (commentCheck.rows[0].student_number !== student_number) {
+      return res.status(403).json({ error: 'You can only edit your own comments' });
+    }
+
+    const result = await client.query(
+      `UPDATE comments 
+       SET content = $1, updated_at = CURRENT_TIMESTAMP 
+       WHERE id = $2 
+       RETURNING *`,
+      [content.trim(), comment_id]
+    );
+
+    const fullComment = await client.query(`
+      SELECT 
+        c.*,
+        s.name as author_name,
+        s.surname as author_surname,
+        s.student_number as author_id
+      FROM comments c
+      LEFT JOIN students s ON c.student_number = s.student_number
+      WHERE c.id = $1
+    `, [comment_id]);
+
+    await client.query('COMMIT');
+
+    const formattedComment = {
+      id: fullComment.rows[0].id,
+      post_id: fullComment.rows[0].post_id,
+      content: fullComment.rows[0].content,
+      author_id: fullComment.rows[0].author_id,
+      author_name: fullComment.rows[0].author_name,
+      author_surname: fullComment.rows[0].author_surname,
+      author_firstname: fullComment.rows[0].author_name,
+      created_at: fullComment.rows[0].created_at,
+      updated_at: fullComment.rows[0].updated_at
+    };
+
+    res.json({ 
+      message: 'Comment updated successfully', 
+      comment: formattedComment 
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error updating comment:', error);
+    res.status(500).json({ error: 'Internal server error: ' + error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.delete('/api/comments/:comment_id', authenticateStudent, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    
+    const { comment_id } = req.params;
+    const student_number = req.user.student_number;
+
+    const commentCheck = await client.query(
+      'SELECT id, student_number FROM comments WHERE id = $1',
+      [comment_id]
+    );
+
+    if (commentCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'Comment not found' });
+    }
+
+    if (commentCheck.rows[0].student_number !== student_number) {
+      return res.status(403).json({ error: 'You can only delete your own comments' });
+    }
+
+    const result = await client.query(
+      'DELETE FROM comments WHERE id = $1 RETURNING id',
+      [comment_id]
+    );
+
+    await client.query('COMMIT');
+
+    res.json({ 
+      message: 'Comment deleted successfully'
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error deleting comment:', error);
+    res.status(500).json({ error: 'Internal server error: ' + error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.get('/api/posts/:post_id/comments/count', async (req, res) => {
+  try {
+    const { post_id } = req.params;
+
+    const result = await pool.query(
+      'SELECT COUNT(*) as comment_count FROM comments WHERE post_id = $1',
+      [post_id]
+    );
+
+    res.json({ 
+      post_id: parseInt(post_id),
+      comment_count: parseInt(result.rows[0].comment_count)
+    });
+  } catch (error) {
+    console.error('Error fetching comment count:', error);
     res.status(500).json({ error: 'Internal server error: ' + error.message });
   }
 });
 
-// ==================== BADGES ROUTES ====================
 app.get('/api/badges/:student_number', async (req, res) => {
   try {
     const { student_number } = req.params;
@@ -1217,7 +1390,6 @@ app.post('/api/badges', authenticateAdmin, async (req, res) => {
   }
 });
 
-// ==================== NOTIFICATIONS ROUTES ====================
 app.get('/api/notifications', authenticateStudent, async (req, res) => {
   try {
     const result = await pool.query(
@@ -1246,7 +1418,6 @@ app.post('/api/notifications', authenticateAdmin, async (req, res) => {
   }
 });
 
-// ==================== RATINGS ROUTES ====================
 app.get('/api/ratings', async (req, res) => {
   try {
     const result = await pool.query(`
@@ -1278,7 +1449,6 @@ app.post('/api/ratings', authenticateStudent, async (req, res) => {
   }
 });
 
-// ==================== SEARCH ROUTES ====================
 app.get('/api/search/students', async (req, res) => {
   try {
     const { query } = req.query;
@@ -1303,7 +1473,6 @@ app.get('/api/search/students', async (req, res) => {
   }
 });
 
-// ==================== DASHBOARD STATS ====================
 app.get('/api/dashboard/stats', authenticateAdmin, async (req, res) => {
   try {
     const [
@@ -1343,7 +1512,6 @@ app.get('/api/dashboard/stats', authenticateAdmin, async (req, res) => {
   }
 });
 
-// ==================== STUDENT DASHBOARD ====================
 app.get('/api/student/dashboard', authenticateStudent, async (req, res) => {
   try {
     const student_number = req.user.student_number;
@@ -1364,7 +1532,6 @@ app.get('/api/student/dashboard', authenticateStudent, async (req, res) => {
       pool.query('SELECT COUNT(*) FROM posts WHERE created_by = $1', [student_number])
     ]);
 
-    // Get recent activity
     const recentPosts = await pool.query(`
       SELECT * FROM posts WHERE created_by = $1 ORDER BY created_at DESC LIMIT 5
     `, [student_number]);
@@ -1393,7 +1560,6 @@ app.get('/api/student/dashboard', authenticateStudent, async (req, res) => {
   }
 });
 
-// ==================== HEALTH CHECK ====================
 app.get('/api/health', async (req, res) => {
   try {
     const dbConnected = await testConnection();
@@ -1412,7 +1578,6 @@ app.get('/api/health', async (req, res) => {
   }
 });
 
-// ==================== ERROR HANDLING ====================
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err);
   res.status(500).json({ error: 'Internal server error' });
@@ -1422,10 +1587,8 @@ app.use((req, res) => {
   res.status(404).json({ error: 'Endpoint not found' });
 });
 
-// ==================== START SERVER ====================
 const startServer = async () => {
   try {
-    // Test database connection
     await testConnection();
     
     app.listen(PORT, () => {
