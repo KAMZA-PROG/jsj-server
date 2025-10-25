@@ -30,13 +30,13 @@ const testConnection = async () => {
   try {
     const client = await pool.connect();
     const result = await client.query('SELECT NOW() as current_time, current_database() as db_name');
-    console.log('✅ Successfully connected to database');
-    console.log(`🏠 Host: ${dbConfig.host}`);
-    console.log(`🗃️ Database: ${result.rows[0].db_name}`);
+    console.log('Successfully connected to database');
+    console.log(`Host: ${dbConfig.host}`);
+    console.log(`Database: ${result.rows[0].db_name}`);
     client.release();
     return true;
   } catch (error) {
-    console.error('❌ Database connection failed:', error.message);
+    console.error('Database connection failed:', error.message);
     return false;
   }
 };
@@ -131,6 +131,13 @@ app.post('/api/init-db', async (req, res) => {
         created_by VARCHAR(9) REFERENCES students(student_number),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         CHECK (group_size <= max_size)
+      )`,
+      `CREATE TABLE IF NOT EXISTS group_members (
+        id SERIAL PRIMARY KEY,
+        group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+        student_number VARCHAR(9) NOT NULL REFERENCES students(student_number) ON DELETE CASCADE,
+        joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(group_id, student_number)
       )`,
       `CREATE TABLE IF NOT EXISTS links (
         id SERIAL PRIMARY KEY,
@@ -243,7 +250,9 @@ app.post('/api/init-db', async (req, res) => {
       'CREATE INDEX IF NOT EXISTS idx_likes_post ON likes(post_id)',
       'CREATE INDEX IF NOT EXISTS idx_comments_post_id ON comments(post_id)',
       'CREATE INDEX IF NOT EXISTS idx_comments_created_at ON comments(created_at)',
-      'CREATE INDEX IF NOT EXISTS idx_comments_student_number ON comments(student_number)'
+      'CREATE INDEX IF NOT EXISTS idx_comments_student_number ON comments(student_number)',
+      'CREATE INDEX IF NOT EXISTS idx_group_members_group ON group_members(group_id)',
+      'CREATE INDEX IF NOT EXISTS idx_group_members_student ON group_members(student_number)'
     ];
 
     for (const indexQuery of indexes) {
@@ -744,6 +753,261 @@ app.delete('/api/groups/:id', authenticateStudent, async (req, res) => {
     res.json({ message: 'Group deleted successfully' });
   } catch (error) {
     res.status(500).json({ error: 'Internal server error: ' + error.message });
+  }
+});
+
+app.get('/api/student/groups', authenticateStudent, async (req, res) => {
+  try {
+    const student_number = req.user.student_number;
+    
+    const result = await pool.query(`
+      SELECT 
+        g.*, 
+        s.name as creator_name, 
+        s.surname as creator_surname,
+        EXISTS(SELECT 1 FROM group_members gm WHERE gm.group_id = g.id AND gm.student_number = $1) as is_member,
+        (SELECT COUNT(*) FROM group_members gm WHERE gm.group_id = g.id) as current_size,
+        (g.created_by = $1) as is_created_by_me
+      FROM groups g
+      LEFT JOIN students s ON g.created_by = s.student_number
+      ORDER BY g.created_at DESC
+    `, [student_number]);
+
+    res.json({ 
+      success: true,
+      data: result.rows 
+    });
+  } catch (error) {
+    console.error('Error fetching student groups:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Internal server error: ' + error.message 
+    });
+  }
+});
+
+app.post('/api/groups/:id/join', authenticateStudent, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    
+    const { id } = req.params;
+    const student_number = req.user.student_number;
+
+    const groupCheck = await client.query(
+      'SELECT id, max_size, group_size FROM groups WHERE id = $1',
+      [id]
+    );
+
+    if (groupCheck.rows.length === 0) {
+      return res.status(404).json({ 
+        success: false,
+        error: 'Group not found' 
+      });
+    }
+
+    const group = groupCheck.rows[0];
+
+    if (group.group_size >= group.max_size) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Group is full' 
+      });
+    }
+
+    const existingMember = await client.query(
+      'SELECT id FROM group_members WHERE group_id = $1 AND student_number = $2',
+      [id, student_number]
+    );
+
+    if (existingMember.rows.length > 0) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Already a member of this group' 
+      });
+    }
+
+    await client.query(
+      'INSERT INTO group_members (group_id, student_number) VALUES ($1, $2)',
+      [id, student_number]
+    );
+
+    await client.query(
+      'UPDATE groups SET group_size = group_size + 1 WHERE id = $1',
+      [id]
+    );
+
+    await client.query('COMMIT');
+
+    res.json({ 
+      success: true,
+      message: 'Successfully joined group' 
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error joining group:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Internal server error: ' + error.message 
+    });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/api/groups/:id/leave', authenticateStudent, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    
+    const { id } = req.params;
+    const student_number = req.user.student_number;
+
+    const memberCheck = await client.query(
+      'SELECT id FROM group_members WHERE group_id = $1 AND student_number = $2',
+      [id, student_number]
+    );
+
+    if (memberCheck.rows.length === 0) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Not a member of this group' 
+      });
+    }
+
+    const groupCheck = await client.query(
+      'SELECT created_by FROM groups WHERE id = $1',
+      [id]
+    );
+
+    if (groupCheck.rows[0].created_by === student_number) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Group creator cannot leave the group. Please delete the group instead.' 
+      });
+    }
+
+    await client.query(
+      'DELETE FROM group_members WHERE group_id = $1 AND student_number = $2',
+      [id, student_number]
+    );
+
+    await client.query(
+      'UPDATE groups SET group_size = group_size - 1 WHERE id = $1',
+      [id]
+    );
+
+    await client.query('COMMIT');
+
+    res.json({ 
+      success: true,
+      message: 'Successfully left group' 
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error leaving group:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Internal server error: ' + error.message 
+    });
+  } finally {
+    client.release();
+  }
+});
+
+app.get('/api/groups/search', authenticateStudent, async (req, res) => {
+  try {
+    const { query } = req.query;
+    const student_number = req.user.student_number;
+
+    if (!query) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Search query required' 
+      });
+    }
+
+    const result = await pool.query(`
+      SELECT 
+        g.*, 
+        s.name as creator_name, 
+        s.surname as creator_surname,
+        EXISTS(SELECT 1 FROM group_members gm WHERE gm.group_id = g.id AND gm.student_number = $1) as is_member,
+        (SELECT COUNT(*) FROM group_members gm WHERE gm.group_id = g.id) as current_size,
+        (g.created_by = $1) as is_created_by_me
+      FROM groups g
+      LEFT JOIN students s ON g.created_by = s.student_number
+      WHERE g.group_name ILIKE $2 OR g.group_description ILIKE $2
+      ORDER BY g.created_at DESC
+    `, [student_number, `%${query}%`]);
+
+    res.json({ 
+      success: true,
+      data: result.rows 
+    });
+  } catch (error) {
+    console.error('Error searching groups:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Internal server error: ' + error.message 
+    });
+  }
+});
+
+app.get('/api/groups/:id/members', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const result = await pool.query(`
+      SELECT s.student_number, s.name, s.surname, s.email, s.year_of_study, c.course_name
+      FROM group_members gm
+      JOIN students s ON gm.student_number = s.student_number
+      LEFT JOIN courses c ON s.course_id = c.id
+      WHERE gm.group_id = $1
+      ORDER BY s.name, s.surname
+    `, [id]);
+
+    res.json({ 
+      success: true,
+      data: result.rows 
+    });
+  } catch (error) {
+    console.error('Error fetching group members:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Internal server error: ' + error.message 
+    });
+  }
+});
+
+app.get('/api/student/joined-groups', authenticateStudent, async (req, res) => {
+  try {
+    const student_number = req.user.student_number;
+    
+    const result = await pool.query(`
+      SELECT 
+        g.*, 
+        s.name as creator_name, 
+        s.surname as creator_surname,
+        true as is_member,
+        (SELECT COUNT(*) FROM group_members gm WHERE gm.group_id = g.id) as current_size,
+        (g.created_by = $1) as is_created_by_me
+      FROM groups g
+      LEFT JOIN students s ON g.created_by = s.student_number
+      WHERE EXISTS(SELECT 1 FROM group_members gm WHERE gm.group_id = g.id AND gm.student_number = $1)
+      ORDER BY g.created_at DESC
+    `, [student_number]);
+
+    res.json({ 
+      success: true,
+      data: result.rows 
+    });
+  } catch (error) {
+    console.error('Error fetching joined groups:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Internal server error: ' + error.message 
+    });
   }
 });
 
@@ -1592,9 +1856,9 @@ const startServer = async () => {
     await testConnection();
     
     app.listen(PORT, () => {
-      console.log(`🚀 JSJ LinkUp server running on port ${PORT}`);
-      console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
-      console.log(`🔒 Server ready for API requests`);
+      console.log(`JSJ LinkUp server running on port ${PORT}`);
+      console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+      console.log(`Server ready for API requests`);
     });
   } catch (error) {
     console.error('Failed to start server:', error);
