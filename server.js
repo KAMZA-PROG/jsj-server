@@ -41,6 +41,35 @@ const testConnection = async () => {
   }
 };
 
+const activeSessions = new Map();
+const activeAdminSessions = new Map();
+
+const authenticateStudent = (req, res, next) => {
+  const sessionId = req.headers['authorization'] || req.headers['session-id'];
+  if (!sessionId) {
+    return res.status(401).json({ error: 'Session ID required' });
+  }
+  const session = activeSessions.get(sessionId);
+  if (!session) {
+    return res.status(401).json({ error: 'Invalid session' });
+  }
+  req.user = session;
+  next();
+};
+
+const authenticateAdmin = (req, res, next) => {
+  const sessionId = req.headers['authorization'] || req.headers['session-id'];
+  if (!sessionId) {
+    return res.status(401).json({ error: 'Session ID required' });
+  }
+  const session = activeAdminSessions.get(sessionId);
+  if (!session) {
+    return res.status(401).json({ error: 'Invalid admin session' });
+  }
+  req.admin = session;
+  next();
+};
+
 app.post('/api/init-db', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -365,8 +394,19 @@ app.post('/api/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
+    const sessionId = `student_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    activeSessions.set(sessionId, {
+      student_number: student.student_number,
+      email: student.email,
+      name: student.name,
+      surname: student.surname
+    });
+
+    setTimeout(() => activeSessions.delete(sessionId), 24 * 60 * 60 * 1000);
+
     res.json({
       message: 'Login successful',
+      sessionId: sessionId,
       student: {
         student_number: student.student_number,
         name: student.name,
@@ -398,8 +438,19 @@ app.post('/api/admin/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
+    const sessionId = `admin_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    activeAdminSessions.set(sessionId, {
+      admin_id: admin.admin_id,
+      email: admin.email,
+      name: admin.name,
+      surname: admin.surname
+    });
+
+    setTimeout(() => activeAdminSessions.delete(sessionId), 24 * 60 * 60 * 1000);
+
     res.json({
       message: 'Admin login successful',
+      sessionId: sessionId,
       admin: {
         admin_id: admin.admin_id,
         name: admin.name,
@@ -413,6 +464,11 @@ app.post('/api/admin/login', async (req, res) => {
 });
 
 app.post('/api/logout', (req, res) => {
+  const sessionId = req.headers['authorization'] || req.headers['session-id'];
+  if (sessionId) {
+    activeSessions.delete(sessionId);
+    activeAdminSessions.delete(sessionId);
+  }
   res.json({ message: 'Logout successful' });
 });
 
@@ -425,7 +481,7 @@ app.get('/api/campuses', async (req, res) => {
   }
 });
 
-app.post('/api/campuses', async (req, res) => {
+app.post('/api/campuses', authenticateAdmin, async (req, res) => {
   try {
     const { campus_name, location, campus_size } = req.body;
     const result = await pool.query(
@@ -438,7 +494,7 @@ app.post('/api/campuses', async (req, res) => {
   }
 });
 
-app.put('/api/campuses/:id', async (req, res) => {
+app.put('/api/campuses/:id', authenticateAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { campus_name, location, campus_size } = req.body;
@@ -455,7 +511,7 @@ app.put('/api/campuses/:id', async (req, res) => {
   }
 });
 
-app.delete('/api/campuses/:id', async (req, res) => {
+app.delete('/api/campuses/:id', authenticateAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const result = await pool.query('DELETE FROM campuses WHERE id = $1 RETURNING id', [id]);
@@ -477,7 +533,7 @@ app.get('/api/faculties', async (req, res) => {
   }
 });
 
-app.post('/api/faculties', async (req, res) => {
+app.post('/api/faculties', authenticateAdmin, async (req, res) => {
   try {
     const { faculty_name, office_address, description } = req.body;
     const result = await pool.query(
@@ -517,7 +573,7 @@ app.get('/api/faculties/:facultyId/courses', async (req, res) => {
   }
 });
 
-app.post('/api/courses', async (req, res) => {
+app.post('/api/courses', authenticateAdmin, async (req, res) => {
   try {
     const { faculty_id, course_name, credits, number_of_modules, course_code } = req.body;
     const result = await pool.query(
@@ -539,7 +595,7 @@ app.get('/api/modules', async (req, res) => {
   }
 });
 
-app.post('/api/modules', async (req, res) => {
+app.post('/api/modules', authenticateAdmin, async (req, res) => {
   try {
     const { module_name, module_code, credits, module_cost } = req.body;
     const result = await pool.query(
@@ -591,10 +647,14 @@ app.get('/api/students/:student_number', async (req, res) => {
   }
 });
 
-app.put('/api/students/:student_number', async (req, res) => {
+app.put('/api/students/:student_number', authenticateStudent, async (req, res) => {
   try {
     const { student_number } = req.params;
     const { name, surname, email, phone_number, year_of_study } = req.body;
+    
+    if (req.user.student_number !== student_number) {
+      return res.status(403).json({ error: 'Cannot update other student profiles' });
+    }
 
     const result = await pool.query(
       `UPDATE students SET name = $1, surname = $2, email = $3, phone_number = $4, year_of_study = $5 
@@ -612,7 +672,7 @@ app.put('/api/students/:student_number', async (req, res) => {
   }
 });
 
-app.delete('/api/students/:student_number', async (req, res) => {
+app.delete('/api/students/:student_number', authenticateAdmin, async (req, res) => {
   try {
     const { student_number } = req.params;
     const result = await pool.query('DELETE FROM students WHERE student_number = $1 RETURNING student_number', [student_number]);
@@ -639,13 +699,13 @@ app.get('/api/groups', async (req, res) => {
   }
 });
 
-app.post('/api/groups', async (req, res) => {
+app.post('/api/groups', authenticateStudent, async (req, res) => {
   try {
-    const { group_name, group_description, max_size, created_by } = req.body;
+    const { group_name, group_description, max_size } = req.body;
     const result = await pool.query(
       `INSERT INTO groups (group_name, group_description, max_size, created_by)
        VALUES ($1, $2, $3, $4) RETURNING *`,
-      [group_name, group_description, max_size, created_by]
+      [group_name, group_description, max_size, req.user.student_number]
     );
     res.status(201).json({ message: 'Group created successfully', group: result.rows[0] });
   } catch (error) {
@@ -653,14 +713,17 @@ app.post('/api/groups', async (req, res) => {
   }
 });
 
-app.put('/api/groups/:id', async (req, res) => {
+app.put('/api/groups/:id', authenticateStudent, async (req, res) => {
   try {
     const { id } = req.params;
     const { group_name, group_description, max_size } = req.body;
-
+    
     const groupCheck = await pool.query('SELECT created_by FROM groups WHERE id = $1', [id]);
     if (groupCheck.rows.length === 0) {
       return res.status(404).json({ error: 'Group not found' });
+    }
+    if (groupCheck.rows[0].created_by !== req.user.student_number) {
+      return res.status(403).json({ error: 'Only group creator can update the group' });
     }
 
     const result = await pool.query(
@@ -674,13 +737,16 @@ app.put('/api/groups/:id', async (req, res) => {
   }
 });
 
-app.delete('/api/groups/:id', async (req, res) => {
+app.delete('/api/groups/:id', authenticateStudent, async (req, res) => {
   try {
     const { id } = req.params;
-
+    
     const groupCheck = await pool.query('SELECT created_by FROM groups WHERE id = $1', [id]);
     if (groupCheck.rows.length === 0) {
       return res.status(404).json({ error: 'Group not found' });
+    }
+    if (groupCheck.rows[0].created_by !== req.user.student_number) {
+      return res.status(403).json({ error: 'Only group creator can delete the group' });
     }
 
     const result = await pool.query('DELETE FROM groups WHERE id = $1 RETURNING id', [id]);
@@ -690,14 +756,10 @@ app.delete('/api/groups/:id', async (req, res) => {
   }
 });
 
-app.get('/api/student/groups', async (req, res) => {
+app.get('/api/student/groups', authenticateStudent, async (req, res) => {
   try {
-    const { student_number } = req.query;
+    const student_number = req.user.student_number;
     
-    if (!student_number) {
-      return res.status(400).json({ error: 'Student number is required' });
-    }
-
     const result = await pool.query(`
       SELECT 
         g.*, 
@@ -724,17 +786,13 @@ app.get('/api/student/groups', async (req, res) => {
   }
 });
 
-app.post('/api/groups/:id/join', async (req, res) => {
+app.post('/api/groups/:id/join', authenticateStudent, async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     
     const { id } = req.params;
-    const { student_number } = req.body;
-
-    if (!student_number) {
-      return res.status(400).json({ error: 'Student number is required' });
-    }
+    const student_number = req.user.student_number;
 
     const groupCheck = await client.query(
       'SELECT id, max_size, group_size FROM groups WHERE id = $1',
@@ -797,17 +855,13 @@ app.post('/api/groups/:id/join', async (req, res) => {
   }
 });
 
-app.post('/api/groups/:id/leave', async (req, res) => {
+app.post('/api/groups/:id/leave', authenticateStudent, async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     
     const { id } = req.params;
-    const { student_number } = req.body;
-
-    if (!student_number) {
-      return res.status(400).json({ error: 'Student number is required' });
-    }
+    const student_number = req.user.student_number;
 
     const memberCheck = await client.query(
       'SELECT id FROM group_members WHERE group_id = $1 AND student_number = $2',
@@ -861,19 +915,16 @@ app.post('/api/groups/:id/leave', async (req, res) => {
   }
 });
 
-app.get('/api/groups/search', async (req, res) => {
+app.get('/api/groups/search', authenticateStudent, async (req, res) => {
   try {
-    const { query, student_number } = req.query;
+    const { query } = req.query;
+    const student_number = req.user.student_number;
 
     if (!query) {
       return res.status(400).json({ 
         success: false,
         error: 'Search query required' 
       });
-    }
-
-    if (!student_number) {
-      return res.status(400).json({ error: 'Student number is required' });
     }
 
     const result = await pool.query(`
@@ -929,14 +980,10 @@ app.get('/api/groups/:id/members', async (req, res) => {
   }
 });
 
-app.get('/api/student/joined-groups', async (req, res) => {
+app.get('/api/student/joined-groups', authenticateStudent, async (req, res) => {
   try {
-    const { student_number } = req.query;
+    const student_number = req.user.student_number;
     
-    if (!student_number) {
-      return res.status(400).json({ error: 'Student number is required' });
-    }
-
     const result = await pool.query(`
       SELECT 
         g.*, 
@@ -964,14 +1011,8 @@ app.get('/api/student/joined-groups', async (req, res) => {
   }
 });
 
-app.get('/api/links', async (req, res) => {
+app.get('/api/links', authenticateStudent, async (req, res) => {
   try {
-    const { student_number } = req.query;
-
-    if (!student_number) {
-      return res.status(400).json({ error: 'Student number is required' });
-    }
-
     const result = await pool.query(`
       SELECT l.*, 
              c.name as connector_name, c.surname as connector_surname,
@@ -981,7 +1022,7 @@ app.get('/api/links', async (req, res) => {
       LEFT JOIN students a ON l.acceptor = a.student_number
       WHERE l.connector = $1 OR l.acceptor = $1
       ORDER BY l.created_at DESC`,
-      [student_number]
+      [req.user.student_number]
     );
     res.json({ links: result.rows });
   } catch (error) {
@@ -989,13 +1030,10 @@ app.get('/api/links', async (req, res) => {
   }
 });
 
-app.post('/api/links', async (req, res) => {
+app.post('/api/links', authenticateStudent, async (req, res) => {
   try {
-    const { acceptor, connector } = req.body;
-
-    if (!connector || !acceptor) {
-      return res.status(400).json({ error: 'Connector and acceptor are required' });
-    }
+    const { acceptor } = req.body;
+    const connector = req.user.student_number;
 
     if (connector === acceptor) {
       return res.status(400).json({ error: 'Cannot link with yourself' });
@@ -1021,18 +1059,12 @@ app.post('/api/links', async (req, res) => {
   }
 });
 
-app.delete('/api/links/:id', async (req, res) => {
+app.delete('/api/links/:id', authenticateStudent, async (req, res) => {
   try {
     const { id } = req.params;
-    const { student_number } = req.body;
-
-    if (!student_number) {
-      return res.status(400).json({ error: 'Student number is required' });
-    }
-
     const result = await pool.query(
       'DELETE FROM links WHERE id = $1 AND (connector = $2 OR acceptor = $2) RETURNING id',
-      [id, student_number]
+      [id, req.user.student_number]
     );
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Link not found or access denied' });
@@ -1057,13 +1089,13 @@ app.get('/api/events', async (req, res) => {
   }
 });
 
-app.post('/api/events', async (req, res) => {
+app.post('/api/events', authenticateStudent, async (req, res) => {
   try {
-    const { name, description, location, event_datetime, created_by } = req.body;
+    const { name, description, location, event_datetime } = req.body;
     const result = await pool.query(
       `INSERT INTO events (name, description, location, event_datetime, created_by)
        VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [name, description, location, event_datetime, created_by]
+      [name, description, location, event_datetime, req.user.student_number]
     );
     res.status(201).json({ message: 'Event created successfully', event: result.rows[0] });
   } catch (error) {
@@ -1071,16 +1103,16 @@ app.post('/api/events', async (req, res) => {
   }
 });
 
-app.put('/api/events/:id', async (req, res) => {
+app.put('/api/events/:id', authenticateStudent, async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, description, location, event_datetime, student_number } = req.body;
+    const { name, description, location, event_datetime } = req.body;
     
     const eventCheck = await pool.query('SELECT created_by FROM events WHERE id = $1', [id]);
     if (eventCheck.rows.length === 0) {
       return res.status(404).json({ error: 'Event not found' });
     }
-    if (eventCheck.rows[0].created_by !== student_number) {
+    if (eventCheck.rows[0].created_by !== req.user.student_number) {
       return res.status(403).json({ error: 'Only event creator can update the event' });
     }
 
@@ -1095,16 +1127,15 @@ app.put('/api/events/:id', async (req, res) => {
   }
 });
 
-app.delete('/api/events/:id', async (req, res) => {
+app.delete('/api/events/:id', authenticateStudent, async (req, res) => {
   try {
     const { id } = req.params;
-    const { student_number } = req.body;
     
     const eventCheck = await pool.query('SELECT created_by FROM events WHERE id = $1', [id]);
     if (eventCheck.rows.length === 0) {
       return res.status(404).json({ error: 'Event not found' });
     }
-    if (eventCheck.rows[0].created_by !== student_number) {
+    if (eventCheck.rows[0].created_by !== req.user.student_number) {
       return res.status(403).json({ error: 'Only event creator can delete the event' });
     }
 
@@ -1129,7 +1160,7 @@ app.get('/api/classes', async (req, res) => {
   }
 });
 
-app.post('/api/classes', async (req, res) => {
+app.post('/api/classes', authenticateAdmin, async (req, res) => {
   try {
     const { class_name, module_id, class_time, class_date, duration_minutes, location, instructor } = req.body;
     const result = await pool.query(
@@ -1143,14 +1174,10 @@ app.post('/api/classes', async (req, res) => {
   }
 });
 
-app.post('/api/classes/:class_id/enroll', async (req, res) => {
+app.post('/api/classes/:class_id/enroll', authenticateStudent, async (req, res) => {
   try {
     const { class_id } = req.params;
-    const { student_number } = req.body;
-
-    if (!student_number) {
-      return res.status(400).json({ error: 'Student number is required' });
-    }
+    const student_number = req.user.student_number;
 
     const existingEnrollment = await pool.query(
       'SELECT * FROM student_classes WHERE student_number = $1 AND class_id = $2',
@@ -1172,14 +1199,10 @@ app.post('/api/classes/:class_id/enroll', async (req, res) => {
   }
 });
 
-app.delete('/api/classes/:class_id/enroll', async (req, res) => {
+app.delete('/api/classes/:class_id/enroll', authenticateStudent, async (req, res) => {
   try {
     const { class_id } = req.params;
-    const { student_number } = req.body;
-
-    if (!student_number) {
-      return res.status(400).json({ error: 'Student number is required' });
-    }
+    const student_number = req.user.student_number;
 
     const result = await pool.query(
       'DELETE FROM student_classes WHERE student_number = $1 AND class_id = $2 RETURNING *',
@@ -1240,16 +1263,13 @@ app.get('/api/posts', async (req, res) => {
   }
 });
 
-app.post('/api/posts', async (req, res) => {
+app.post('/api/posts', authenticateStudent, async (req, res) => {
   try {
-    const { title, caption, content, created_by } = req.body;
+    const { title, caption, content } = req.body;
+    const created_by = req.user.student_number;
 
     if (!title) {
       return res.status(400).json({ error: 'Title is required' });
-    }
-
-    if (!created_by) {
-      return res.status(400).json({ error: 'Creator student number is required' });
     }
 
     const postContent = caption || content || '';
@@ -1303,14 +1323,10 @@ app.post('/api/posts', async (req, res) => {
   }
 });
 
-app.post('/api/posts/:post_id/like', async (req, res) => {
+app.post('/api/posts/:post_id/like', authenticateStudent, async (req, res) => {
   try {
     const { post_id } = req.params;
-    const { student_number } = req.body;
-
-    if (!student_number) {
-      return res.status(400).json({ error: 'Student number is required' });
-    }
+    const student_number = req.user.student_number;
 
     const postCheck = await pool.query('SELECT id FROM posts WHERE id = $1', [post_id]);
     if (postCheck.rows.length === 0) {
@@ -1346,14 +1362,10 @@ app.post('/api/posts/:post_id/like', async (req, res) => {
   }
 });
 
-app.delete('/api/posts/:post_id/like', async (req, res) => {
+app.delete('/api/posts/:post_id/like', authenticateStudent, async (req, res) => {
   try {
     const { post_id } = req.params;
-    const { student_number } = req.body;
-
-    if (!student_number) {
-      return res.status(400).json({ error: 'Student number is required' });
-    }
+    const student_number = req.user.student_number;
 
     const result = await pool.query(
       'DELETE FROM likes WHERE post_id = $1 AND student_number = $2 RETURNING id',
@@ -1422,20 +1434,17 @@ app.get('/api/posts/:post_id/comments', async (req, res) => {
   }
 });
 
-app.post('/api/posts/:post_id/comments', async (req, res) => {
+app.post('/api/posts/:post_id/comments', authenticateStudent, async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     
     const { post_id } = req.params;
-    const { content, student_number } = req.body;
+    const { content } = req.body;
+    const student_number = req.user.student_number;
 
     if (!content || content.trim().length === 0) {
       return res.status(400).json({ error: 'Comment content is required' });
-    }
-
-    if (!student_number) {
-      return res.status(400).json({ error: 'Student number is required' });
     }
 
     const postCheck = await client.query('SELECT id FROM posts WHERE id = $1', [post_id]);
@@ -1487,20 +1496,17 @@ app.post('/api/posts/:post_id/comments', async (req, res) => {
   }
 });
 
-app.put('/api/comments/:comment_id', async (req, res) => {
+app.put('/api/comments/:comment_id', authenticateStudent, async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     
     const { comment_id } = req.params;
-    const { content, student_number } = req.body;
+    const { content } = req.body;
+    const student_number = req.user.student_number;
 
     if (!content || content.trim().length === 0) {
       return res.status(400).json({ error: 'Comment content is required' });
-    }
-
-    if (!student_number) {
-      return res.status(400).json({ error: 'Student number is required' });
     }
 
     const commentCheck = await client.query(
@@ -1562,17 +1568,13 @@ app.put('/api/comments/:comment_id', async (req, res) => {
   }
 });
 
-app.delete('/api/comments/:comment_id', async (req, res) => {
+app.delete('/api/comments/:comment_id', authenticateStudent, async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     
     const { comment_id } = req.params;
-    const { student_number } = req.body;
-
-    if (!student_number) {
-      return res.status(400).json({ error: 'Student number is required' });
-    }
+    const student_number = req.user.student_number;
 
     const commentCheck = await client.query(
       'SELECT id, student_number FROM comments WHERE id = $1',
@@ -1638,7 +1640,7 @@ app.get('/api/badges/:student_number', async (req, res) => {
   }
 });
 
-app.post('/api/badges', async (req, res) => {
+app.post('/api/badges', authenticateAdmin, async (req, res) => {
   try {
     const { badge_name, description, student_number } = req.body;
     const result = await pool.query(
@@ -1652,19 +1654,13 @@ app.post('/api/badges', async (req, res) => {
   }
 });
 
-app.get('/api/notifications', async (req, res) => {
+app.get('/api/notifications', authenticateStudent, async (req, res) => {
   try {
-    const { student_number } = req.query;
-
-    if (!student_number) {
-      return res.status(400).json({ error: 'Student number is required' });
-    }
-
     const result = await pool.query(
       `SELECT * FROM notifications 
        WHERE (target_type = 'student' AND target_student = $1)
        ORDER BY created_at DESC`,
-      [student_number]
+      [req.user.student_number]
     );
     res.json({ notifications: result.rows });
   } catch (error) {
@@ -1672,7 +1668,7 @@ app.get('/api/notifications', async (req, res) => {
   }
 });
 
-app.post('/api/notifications', async (req, res) => {
+app.post('/api/notifications', authenticateAdmin, async (req, res) => {
   try {
     const { name, description, target_type, target_student, target_admin } = req.body;
     const result = await pool.query(
@@ -1703,18 +1699,13 @@ app.get('/api/ratings', async (req, res) => {
   }
 });
 
-app.post('/api/ratings', async (req, res) => {
+app.post('/api/ratings', authenticateStudent, async (req, res) => {
   try {
-    const { rating_value, rating_description, student_number } = req.body;
-
-    if (!student_number) {
-      return res.status(400).json({ error: 'Student number is required' });
-    }
-
+    const { rating_value, rating_description } = req.body;
     const result = await pool.query(
       `INSERT INTO ratings (rator_type, rator_student, rating_value, rating_description)
        VALUES ('student', $1, $2, $3) RETURNING *`,
-      [student_number, rating_value, rating_description]
+      [req.user.student_number, rating_value, rating_description]
     );
     res.status(201).json({ message: 'Rating submitted successfully', rating: result.rows[0] });
   } catch (error) {
@@ -1746,7 +1737,7 @@ app.get('/api/search/students', async (req, res) => {
   }
 });
 
-app.get('/api/dashboard/stats', async (req, res) => {
+app.get('/api/dashboard/stats', authenticateAdmin, async (req, res) => {
   try {
     const [
       studentsCount,
@@ -1785,14 +1776,10 @@ app.get('/api/dashboard/stats', async (req, res) => {
   }
 });
 
-app.get('/api/student/dashboard', async (req, res) => {
+app.get('/api/student/dashboard', authenticateStudent, async (req, res) => {
   try {
-    const { student_number } = req.query;
+    const student_number = req.user.student_number;
     
-    if (!student_number) {
-      return res.status(400).json({ error: 'Student number is required' });
-    }
-
     const [
       linksCount,
       groupsCount,
